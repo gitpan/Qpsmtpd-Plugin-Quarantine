@@ -28,6 +28,7 @@ WriteMakefile(
 		'Mail::Field::Received'	=> 0,
 		'Sys::Hostname'		=> 0,
 		'IO::Handle'		=> 0,
+		'Mail::SendVarious'	=> 0,
 	 },
 );
 

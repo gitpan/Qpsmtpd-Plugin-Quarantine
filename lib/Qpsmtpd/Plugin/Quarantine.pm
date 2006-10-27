@@ -50,7 +50,7 @@ require Exporter;
 use strict;
 use warnings;
 
-our $VERSION = 0.3;
+our $VERSION = 0.31;
 my $debug = 1;
 
 our $myhostname = hostname();

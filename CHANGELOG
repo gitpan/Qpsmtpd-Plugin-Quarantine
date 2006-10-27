@@ -1,2 +1,9 @@
 
+=2006/10/26	0.31
+
+Add Mail::SendVarious to prerequisites.  Remove Fork.pm
+(now located elsewhere)
+
+=2006/10/26	0.3	
+
 Initial release
