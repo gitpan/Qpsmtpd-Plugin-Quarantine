@@ -39,6 +39,7 @@ send.  How often should we send a bounce message?
 	</ul>
 
 <input type="submit" name="action" value="[% GET config.button_sender_update %]">
+<input type="submit" name="action" value="[% GET config.button_sender_reset_timer %]">
 </p>
 [% GET hiddenstate %]
 </form>

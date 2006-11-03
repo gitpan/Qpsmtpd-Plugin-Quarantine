@@ -54,6 +54,9 @@ sub cronjob
 {
 	my $start = time;
 
+	print "# upgrades?\n";
+	upgrade();
+
 	print "# cleaning out messages\n" if $debug;
 	my $messages_deleted = 0;
 	for(;;) {
@@ -93,13 +96,57 @@ sub cronjob
 	printf "Time for batch run: %d (seconds)\n", time - $start;
 }
 
+sub upgrade
+{
+	transaction(sub {
+		my $oops = get_oops();
+		my $qd = $oops->{quarantine};
+		if ($qd->{version} <= 0.31) {
+			print "Fixing 3600 hours/day problem\n";
+
+			my $time = time;
+			my $b0 = $qd->{buckets};
+			my $b0count = 0;
+			for my $day (sort { $a <=> $b } keys %{$b0}) {
+				print " Remapping ".scalar(gmtime($day*86400))."\n";
+				my $b1count = 0;
+				my $b1 = $b0->{$day};
+				for my $bucket (keys %{$b1}) {
+					my $oldtime = $day * 86400 + $bucket * 24;
+					print "  Bucket at ".scalar(gmtime($oldtime))."\n";
+					my $b2 = $b1->{$bucket};
+					my $count = 0;
+					for my $header_checksum (keys %$b2) {
+						$qd->{buckets3}{int($oldtime / 86400)}{int(($oldtime % 86400) / 3600)}{$header_checksum} = $b2->{$header_checksum};
+						$oops->virtual_object($qd->{buckets3}{int($oldtime / 86400)}, 1);
+						$oops->virtual_object($qd->{buckets3}{int($oldtime / 86400)}{int(($oldtime % 86400) / 3600)}, 1);
+						$count++;
+					}
+					print "  $count headers moved\n";
+					$b1count += $count;
+					delete $b1->{$bucket};
+				}
+				print " $b1count moved\n";
+				$b0count += $b1count;
+				delete $b0->{$day};
+			}
+			print "Total moved: $b0count\n";
+		}
+		require Qpsmtpd::Plugin::Quarantine;
+		delete $qd->{buckets};
+		$qd->{version} = $Qpsmtpd::Plugin::Quarantine::VERSION;
+		$oops->commit;
+	});
+}
+
 sub find_oldest_bucket
 {
 	my ($oops) = @_;
 
 	my $qd = $oops->{quarantine};
 
-	my $b0 = $qd->{buckets};
+	my $b0 = $qd->{buckets3};
+
 	my ($b0first) = sort { $a <=> $b } keys %{$b0};
 	my $b1 = $b0->{$b0first};
 	my ($b1first) = sort { $a <=> $b } keys %{$b1};
@@ -270,6 +317,12 @@ sub recipient_agent
 	my $rd = $qd->{recipients}{$recipient};
 	unless ($rd) {
 		print STDERR "That's odd, cannot find recipient '$recipient'\n";
+		return;
+	}
+	unless ($rd->{headers}) {
+		print STDERR "Recipient $recipient invalid, deleting\n";
+		delete $qd->{recipients}{$recipient};
+		$recipients_deleted++;
 		return;
 	}
 	if (

@@ -50,7 +50,7 @@ require Exporter;
 use strict;
 use warnings;
 
-our $VERSION = 0.31;
+our $VERSION = 0.32;
 my $debug = 1;
 
 our $myhostname = hostname();
@@ -188,14 +188,14 @@ sub hook_data_post
 	} elsif ($defaults{randomly_check_messages} && rand(100) < $defaults{randomly_check_messages}) {
 		$qp->log(LOGDEBUG, "Checking message randomly");
 	} else {
-		$qp->log(LOGDEBUG, "Not checking for spam");
+		$qp->log(LOGDEBUG, "QRESULT: Not checking for spam");
 		return DECLINED;
 	}
 
 	my $spammy = check_message_for_spam($qp, $transaction);
 
 	unless ($spammy) {
-		$qp->log(LOGDEBUG, "Not spam");
+		$qp->log(LOGDEBUG, "QRESULT: Not spam");
 		return DECLINED;
 	}
 
@@ -316,14 +316,8 @@ sub filterit
 				push(@passthrough_recipients, $r);
 				next;
 			}
-			unless ($rd) {
-				$rd = $qd->{recipients}{$r} = bless {
-					address		=> $r,
-					mcount		=> 0,
-					headers		=> {},
-				}, 'Quarantine::Recipient';
-				$oops->virtual_object($rd->{headers}, 1);
-			}
+			$rd = new_recipient($oops, $r)
+				unless $rd;
 			$rd->{mcount} += 1;
 			$rd->{total_count} += 1;
 
@@ -543,9 +537,12 @@ sub filterit
 			}, 'Quarantine::Header';
 			$pbody->{last_reference} = $pheader;
 			$psender->{headers}{$header_checksum} = $pheader;
-			$qd->{buckets}{int($time / 86400)}{int(($time % 86400) / 24)}{$header_checksum} = $pheader;
-			$oops->virtual_object($qd->{buckets}{int($time / 86400)}, 1);
-			$oops->virtual_object($qd->{buckets}{int($time / 86400)}{int(($time % 86400) / 24)}, 1);
+			unless ($qd->{buckets3}) {
+				$qd->{buckets3} = bless {}, 'Quarantine::Buckets';
+			}
+			$qd->{buckets3}{int($time / 86400)}{int(($time % 86400) / 3600)}{$header_checksum} = $pheader;
+			$oops->virtual_object($qd->{buckets3}{int($time / 86400)}, 1);
+			$oops->virtual_object($qd->{buckets3}{int($time / 86400)}{int(($time % 86400) / 3600)}, 1);
 
 			for my $r (@quarantine_recipients, @filter_recipients) {
 				my $rd = $qd->{recipients}{$r};
@@ -661,8 +658,8 @@ sub initialize
 	my $qd = $oops->{quarantine} = bless {
 		senders		=> (bless {}, 'Quarantine::Senders'),
 		headers		=> (bless {}, 'Quarantine::Headers'),
-		bodies		=> (bless {}, 'Quarantine::Bodies'),
-		buckets		=> (bless {}, 'Quarantine::Buckets'),
+		bodies		=> (bless {}, 'Quarantine::Bodies'), 
+		buckets3	=> (bless {}, 'Quarantine::Buckets'),
 		recipients	=> (bless {}, 'Quarantine::Recipients'),
 		mqueue		=> (bless {}, 'Quarantine::MailQueue'),
 		version		=> $VERSION,

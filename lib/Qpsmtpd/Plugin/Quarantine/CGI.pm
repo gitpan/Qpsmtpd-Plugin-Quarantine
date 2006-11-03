@@ -118,17 +118,26 @@ sub handle_unauthorized_sender
 	my $action = $cgi->param('action') || '';
 
 	my $psender = $qd->{senders}{$sender};
-	my $token = $psender->{token};
-	$oops->commit();
+	my $token = $psender && $psender->{token};
 
-	if ($action eq $defaults{button_sender_url} && $sender =~ /^[^\@]+\@([^\@]+)$/) {
+	if ($action eq $defaults{button_sender_url} && $sender =~ /^([^\@]+)\@([^\@]+)$/) {
 		my $buf;
 		# sender may not exist yet
+		if ($psender) {
+			$token = md5_hex($$ . Time::HiRes::time() . $qd->{random_token} . $sender);
+			$psender->{token} = $token;
+			print STDERR "New token for $sender: $token\n";
+		} else {
+			$psender = new_sender($oops, $1, $sender);
+			$token = $psender->{token};
+			print STDERR "First token for $sender: $token\n";
+		} 
+		$oops->commit();
 		$template->process('sender-notification.mail', {
 			config		=> \%defaults,
 			sender		=> $sender,
 			request_ip	=> $ENV{REMOTE_ADDR} || $ENV{REMOTE_HOST},
-			sender_url	=> "$defaults{baseurl}/sender/$token/$escape{$sender}",
+			sender_url	=> $psender->url(),
 			now		=> scalar(localtime(time)),
 		}, \$buf) || error $Template::ERROR;
 		print STDERR "Message to send to $sender:\n$buf" if $debug;
@@ -237,6 +246,12 @@ sub sender_action
 			push(@message, "You will only be notified every $bf days (per IP address) if we think a message might be spam");
 		}
 		$docommit = 1;
+	} elsif ($action eq $defaults{button_sender_reset_timer}) {
+		if (%{$psender->{send_ip_used}}) {
+			$psender->{sender}{send_ip_used} = {};
+			$docommit = 1;
+			push(@message, "Notification timers reset");
+		}
 	} elsif ($action eq $defaults{button_sender_replace_token}) {
 		require Time::HiRes;
 		$psender->{token} = md5_hex($qd->{random_token} . $sender . Time::HiRes::time() . $$ . $ENV{REMOTE_HOST} . $ENV{REMOTE_ADDR});
@@ -346,11 +361,8 @@ sub handle_recipient
 	my $action	= $cgi->param('action') || '';
 	my $rd		= $qd->{recipients}{$recipient};
 
-	unless ($rd) {
-		$rd = $qd->{recipients}{$recipient} = {
-			recipient	=> $recipient,
-		};
-	}
+	$rd = new_recipient($oops, $recipient)
+		unless $rd;
 
 	my $correct_checksum = $rd->{token} || md5_hex($qd->{random_token} . $recipient);
 
@@ -488,6 +500,49 @@ sub recipient_action
 	return($showform, @message);
 }
 
+sub handle_unauthorized_recipient
+{
+	my ($oops, $recipient_encoded) = @_;
+
+	print $cgi->header();
+
+	my $qd = $oops->{quarantine} || error;
+
+	my $recipient = CGI::unescape($recipient_encoded) || $cgi->param('recipient');
+
+	my $action = $cgi->param('action') || '';
+
+	my $rd = $qd->{recipients}{$recipient};
+	my $token = ($rd && $rd->{token}) || md5_hex($qd->{random_token} . $recipient);
+
+	if ($action eq $defaults{button_recipient_url} && $recipient =~ /^[^\@]+\@([^\@]+)$/) {
+		my $buf;
+		# recipient may not exist yet
+		$template->process('recipient-notification.mail', {
+			config		=> \%defaults,
+			recipient	=> $recipient,
+			request_ip	=> $ENV{REMOTE_ADDR} || $ENV{REMOTE_HOST},
+			recipient_url	=> "$defaults{baseurl}/recipient/$token/$escape{$recipient}",
+			now		=> scalar(localtime(time)),
+		}, \$buf) || error $Template::ERROR;
+		print STDERR "Message to send to $recipient:\n$buf" if $debug;
+		sendmail_or_postpone(from => $defaults{send_from}, to => $recipient, message => $buf);
+		if ($rd && ($rd->{action} eq 'forward')) {
+			print STDERR "ALSO Message to send to $rd->{new_address}\n" if $debug;
+			sendmail_or_postpone(from => $defaults{send_from}, to => $rd->{new_address}, message => $buf);
+		}
+		$template->process('access-url-sent.tt2', {
+			config		=> \%defaults,
+			recipient	=> $recipient,
+		}) || error $Template::ERROR;
+	} else {
+		$template->process('unauthorized-recipient.tt2', {
+			config		=> \%defaults,
+			recipient	=> $recipient
+		}) || error $Template::ERROR;
+	}
+}
+
 
 sub handle_message
 {
@@ -560,55 +615,12 @@ sub handle_message
 		}
 		my $x;
 		$template->process('message-menu.tt2', \%args, \$x) or error $Template::ERROR;
-		print STDERR "X=$x\n";
+#		print STDERR "X=$x\n";
 		print $x;
 	} elsif (handle_other_messages($oops, $h->{sender}, $action, \%args, 'message-menu.tt2')) {
 		# nada
 	} else {
 		error "action=$action";
-	}
-}
-
-sub handle_unauthorized_recipient
-{
-	my ($oops, $recipient_encoded) = @_;
-
-	print $cgi->header();
-
-	my $qd = $oops->{quarantine} || error;
-
-	my $recipient = CGI::unescape($recipient_encoded) || $cgi->param('recipient');
-
-	my $action = $cgi->param('action') || '';
-
-	my $rd = $qd->{recipients}{$recipient};
-	my $token = $rd->{token} || md5_hex($qd->{random_token} . $recipient);
-
-	if ($action eq $defaults{button_recipient_url} && $recipient =~ /^[^\@]+\@([^\@]+)$/) {
-		my $buf;
-		# recipient may not exist yet
-		$template->process('recipient-notification.mail', {
-			config		=> \%defaults,
-			recipient	=> $recipient,
-			request_ip	=> $ENV{REMOTE_ADDR} || $ENV{REMOTE_HOST},
-			recipient_url	=> "$defaults{baseurl}/recipient/$token/$escape{$recipient}",
-			now		=> scalar(localtime(time)),
-		}, \$buf) || error $Template::ERROR;
-		print STDERR "Message to send to $recipient:\n$buf" if $debug;
-		sendmail_or_postpone(from => $defaults{send_from}, to => $recipient, message => $buf);
-		if ($rd->{action} eq 'forward') {
-			print STDERR "ALSO Message to send to $rd->{new_address}\n" if $debug;
-			sendmail_or_postpone(from => $defaults{send_from}, to => $rd->{new_address}, message => $buf);
-		}
-		$template->process('access-url-sent.tt2', {
-			config		=> \%defaults,
-			recipient	=> $recipient,
-		}) || error $Template::ERROR;
-	} else {
-		$template->process('unauthorized-recipient.tt2', {
-			config		=> \%defaults,
-			recipient	=> $recipient
-		}) || error $Template::ERROR;
 	}
 }
 

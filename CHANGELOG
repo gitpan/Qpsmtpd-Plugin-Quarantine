@@ -1,4 +1,13 @@
 
+=2006/11/03	0.32
+
+Send new sender token didn't work.  It does now.
+
+Recipients created through the CGI were broken.
+
+The message store schema was broken: thought there were 
+3600 hours in a day...  cronjob() will repair.
+
 =2006/10/26	0.31
 
 Add Mail::SendVarious to prerequisites.  Remove Fork.pm

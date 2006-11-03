@@ -32,7 +32,7 @@ use Sys::Hostname;
 use strict;
 
 our @ISA = qw(Exporter);
-our @EXPORT = qw(new_sender get_oops %defaults %escape recompute_defaults);
+our @EXPORT = qw(new_sender new_recipient get_oops %defaults %escape recompute_defaults);
 our @EXPORT_OK = qw(%base_defaults);
 
 our $myhostname = hostname();
@@ -157,9 +157,11 @@ our %base_defaults = (
 	button_sender_delete_all	=> 'Delete All Messages',
 	button_sender_delete_checked	=> 'Delete Checked Messages',
 	button_sender_replace_token	=> 'ReplaceSenderToken',
+	button_sender_reset_timer	=> 'Reset Bounce Notification Timer',
 	button_recipient_update		=> 'Update My Settings',
 	button_recipient_url		=> 'Send Me An Access URL',
 	button_recipient_replace_token	=> 'ReplaceToken',
+#	button_recipient_reset_timer	=> 'Reset Notification Timer',
 
 );
 
@@ -208,6 +210,19 @@ sub new_sender
 	$oops->virtual_object($psender->{headers});
 	$oops->virtual_object($psender->{send_ip_used});
 	return $psender;
+}
+
+sub new_recipient
+{
+	my ($oops, $address) = @_;
+	my $qd = $oops->{quarantine} || die;
+	my $rd = $qd->{recipients}{$address} = bless {
+		address		=> $address,
+		mcount		=> 0,
+		headers		=> {},
+	}, 'Quarantine::Recipient';
+	$oops->virtual_object($rd->{headers}, 1);
+	return $rd;
 }
 
 sub get_oops
