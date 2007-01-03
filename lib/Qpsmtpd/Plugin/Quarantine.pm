@@ -50,7 +50,7 @@ require Exporter;
 use strict;
 use warnings;
 
-our $VERSION = 0.32;
+our $VERSION = 0.35;
 my $debug = 1;
 
 our $myhostname = hostname();
@@ -517,7 +517,10 @@ sub filterit
 				$pbody = $qd->{bodies}{$body_checksum} = bless {
 					body 	=> $body,
 					cksum	=> $body_checksum,
+					size	=> length($body),
 				}, 'Quarantine::Body';
+				$qd->{diskused}{$$ % $defaults{size_storage_array_size}}
+					+= length($body) + $defaults{message_size_overhead};
 			}
 			my @recip = $sender_quarantine
 				? @recipients
@@ -662,6 +665,7 @@ sub initialize
 		buckets3	=> (bless {}, 'Quarantine::Buckets'),
 		recipients	=> (bless {}, 'Quarantine::Recipients'),
 		mqueue		=> (bless {}, 'Quarantine::MailQueue'),
+		diskused	=> (bless {}, 'Quarantine::DiskUsage'),
 		version		=> $VERSION,
 	}, 'Quarantine::Top';
 	$oops->virtual_object($qd->{headers}, 1);
@@ -669,6 +673,7 @@ sub initialize
 	$oops->virtual_object($qd->{senders}, 1);
 	$oops->virtual_object($qd->{recipients}, 1);
 	$oops->virtual_object($qd->{mqueue}, 1);
+	$oops->virtual_object($qd->{diskused}, 1);
 
 	# make a pseudo-random token
 	my $header_checksum = md5_hex($transaction->header()->as_string());

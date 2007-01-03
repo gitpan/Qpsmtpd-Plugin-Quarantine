@@ -134,6 +134,13 @@ our %base_defaults = (
 	message_longevity	=> 30,		# how long to keep messages in quarantine (days)
 	delete_batchsize	=> 50,		# how many messages to delete per transaction
 	keep_idle_recipients	=> 720,		# how long to keep idle recipients that have settings (days)
+	message_store_size	=> 1500,	# Megabytes
+
+	#
+	# Internal data structures
+	#
+	size_storage_array_size	=> 256,		# transaction parallism
+	message_size_overhead	=> 500,		# header, etc
 
 	#
 	# Internal Mail Queue

@@ -62,16 +62,21 @@ sub cronjob
 	for(;;) {
 		my $done;
 		my $del;
+		my $diskused = message_store_size();
 		transaction(sub {
 			my $oops = get_oops();
 			my $oldest = find_oldest_bucket($oops);
 			if ($oldest and (time - $oldest) / 86400 > $defaults{message_longevity}) {
 				printf "# Oldest bucket is dated %s, must prune headers\n", scalar(localtime($oldest)) if $debug;
 				$del = prune_headers($oops);
+			} elsif ($diskused / 1024000 > $defaults{message_store_size}) {
+				printf "# Oldest bucket is dated %s, we're over our disk quote -- must prune headers\n", scalar(localtime($oldest)) if $debug;
+				$del = prune_headers($oops);
 			} else {
 				printf "# Oldest bucket is dated %s, we're done\n", scalar(localtime($oldest)) if $debug;
 				$done = 1;
 			}
+			$oops->commit() if $del;
 		});
 		$messages_deleted += $del;
 		last if $done;
@@ -99,9 +104,15 @@ sub cronjob
 sub upgrade
 {
 	transaction(sub {
-		my $oops = get_oops();
-		my $qd = $oops->{quarantine};
-		if ($qd->{version} <= 0.31) {
+		my $version;
+		{
+			my $oops = get_oops();
+			my $qd = $oops->{quarantine};
+			$version = $qd->{version};
+		}
+		if ($version <= 0.31) {
+			my $oops = get_oops();
+			my $qd = $oops->{quarantine};
 			print "Fixing 3600 hours/day problem\n";
 
 			my $time = time;
@@ -131,12 +142,101 @@ sub upgrade
 				delete $b0->{$day};
 			}
 			print "Total moved: $b0count\n";
+			update_version($oops);
+			$oops->commit();
 		}
+		if ($version < 0.34) {
+			$| = 1;
+			transaction(sub {
+				my $oops = get_oops();
+				print "Counting up message storage space...\n";
+				my $qd = $oops->{quarantine};
+				$qd->{diskused} = {}
+					unless $qd->{diskused};
+				bless $qd->{diskused}, 'Quarantine::DiskUsage';
+				$oops->virtual_object($qd->{diskused}, 1);
+			});
+
+			my $tsize = 0;
+			my $tcount = 0;
+			my $size;
+			my $count;
+			my @buf;
+
+			require Qpsmtpd::Plugin::Quarantine;
+
+			fork_agent(
+				sub { 
+					my ($pipe) = @_;
+					my $oops = get_oops(readonly => 1, less_caching => 1);
+					my $qd = $oops->{quarantine};
+					for my $bdsum (keys %{$qd->{bodies}}) {
+chomp($bdsum);
+						print $pipe "$bdsum\n";
+					}
+				},
+				sub {
+					my ($agent, $batch_size, $line) = @_;
+					push(@buf, $line)
+						if defined $line;
+					if (@buf >= $batch_size or ! defined($line) or $line eq "DO-COMMIT\n") {
+						transaction(sub {
+							$size = 0;
+							$count = 0;
+							my $oops = get_oops();
+							my $qd = $oops->{quarantine};
+							for my $line (@buf) {
+								&$agent($oops, $line);
+							}
+							$qd->{diskused}{$$ % $defaults{size_storage_array_size}} += $size + $count * $defaults{message_size_overhead};
+							$oops->commit();
+							$tsize += $size;
+							$tcount += $count;
+							print "C";
+						});
+						undef @buf;
+					}
+				},
+				sub {
+					my ($oops, $bdsum) = @_;
+					my $qd = $oops->{quarantine};
+					chomp($bdsum);
+					my $pbody = $qd->{bodies}{$bdsum};
+					return unless $pbody;
+					return if $pbody->{size};
+					$pbody->{size} = length($pbody->{body});
+					$size += $pbody->{size};
+					$count += 1;
+					print "." if ($tcount + $count) % 10 == 0;
+				},
+				50
+				);
+
+			printf "\n%d messages using %.1fMB\n", $tcount, $tsize / 1024000;
+
+			update_version();
+		}
+	});
+}
+
+sub update_version
+{
+	my ($oops) = @_;
+	my $doit = sub {
+		my $qd = $oops->{quarantine};
 		require Qpsmtpd::Plugin::Quarantine;
 		delete $qd->{buckets};
 		$qd->{version} = $Qpsmtpd::Plugin::Quarantine::VERSION;
-		$oops->commit;
-	});
+	};
+	if ($oops) {
+		&$doit();
+	} else {
+		transaction(sub {
+			$oops = get_oops();
+			&$doit();
+			$oops->commit;
+		});
+	}
 }
 
 sub find_oldest_bucket
@@ -155,6 +255,20 @@ sub find_oldest_bucket
 
 	return ($b0, $b0first, $b1, $b1first, $bucket) if wantarray;
 	return $b0first * 86400 + $b1first * 3600;
+}
+
+sub message_store_size
+{
+	transaction(sub {
+		my $oops = get_oops();
+		my $qd = $oops->{quarantine};
+		my $size = 0;
+		for my $v (values %{$qd->{diskused}}) {
+			$size += $v;
+		}
+printf "Disk space used %.1fMB\n", $size / 1024000;
+		return $size;
+	});
 }
 
 my $mqueue_sent;
@@ -258,9 +372,27 @@ sub prune_headers
 	$messages = $defaults{delete_batchsize}
 		unless $messages;
 
+	print "Pruning $messages messages\n" if $debug > 2;
+
 	my $qd = $oops->{quarantine};
 
-	my ($b0, $b0first, $b1, $b1first, $bucket) = find_oldest_bucket($oops);
+	my ($b0, $b0first, $b1, $b1first, $bucket);
+
+	for(;;) {
+		($b0, $b0first, $b1, $b1first, $bucket) = find_oldest_bucket($oops);
+		last if $bucket && %$bucket;
+		if (%$b1) {
+			print "Deleting b1first $b1first\n" if $debug >2;
+			delete $b1->{$b1first};
+			redo;
+		}
+		if (%$b0) {
+			print "Deleting b0first $b0first\n" if $debug >2;
+			delete $b0->{$b0first};
+			redo;
+		}
+		die "no messages";
+	}
 
 	my $pruned = 0;
 	my ($hcksum, $pheader);
@@ -272,7 +404,7 @@ sub prune_headers
 		my $psender = $pheader->{sender};
 		my $recipients = $pheader->{recipients};
 
-		print STDERR <<END if $debug;
+		print STDERR <<END if $debug > 3;
 Removing....
 From $psender->{address}
 From: $pheader->{from}To: $pheader->{to}Subject: $pheader->{subject}Date: $pheader->{date}
@@ -284,9 +416,12 @@ END
 			delete $pbody->{last_reference};
 			my $bcksum = $pbody->{cksum};
 			delete $qd->{bodies}{$bcksum};
-			print STDERR "(body too)\n\n";
+			$qd->{diskused}{$$ % $defaults{size_storage_array_size}}
+				-= $pbody->{size};
+
+			print STDERR "(body too)\n\n" if $debug > 3
 		} else {
-			print STDERR "\n";
+			print STDERR "\n" if $debug > 3;
 		}
 		delete $bucket->{$hcksum};
 		delete $qd->{headers}{$hcksum};
@@ -299,6 +434,7 @@ END
 			}
 		}
 	}
+	print "Only pruned $pruned messages\n" if $debug >2;
 	delete $b1->{$b1first};
 	return $pruned;
 }
