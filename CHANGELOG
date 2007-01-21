@@ -1,3 +1,9 @@
+
+=2007/01/21	0.36
+
+Fixed a problem with the example template for displaying
+recipient messages.
+
 =2007/01/03	0.35
 
 Old messages weren't getting cleared out properly. 
