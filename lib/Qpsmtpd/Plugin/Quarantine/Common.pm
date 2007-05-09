@@ -32,7 +32,7 @@ use Sys::Hostname;
 use strict;
 
 our @ISA = qw(Exporter);
-our @EXPORT = qw(new_sender new_recipient get_oops %defaults %escape recompute_defaults);
+our @EXPORT = qw(new_sender new_recipient get_oops oops_args %defaults %escape recompute_defaults);
 our @EXPORT_OK = qw(%base_defaults);
 
 our $myhostname = hostname();
@@ -126,8 +126,8 @@ our %base_defaults = (
 	#
 	# Cron job config
 	#
-	sender_stride_length	=> 10,		# when cleaning, process N senders per transaction
-	recipient_stride_length	=> 10,		# when cleaning, process N recipients per transaction
+	sender_stride_length	=> 40,		# when cleaning, process N senders per transaction
+	recipient_stride_length	=> 40,		# when cleaning, process N recipients per transaction
 	sender_history_to_keep	=> 20,		# how many days spamming history to keep per sender
 	keep_every_nth_message	=> 200,		# quarantine every Nth spam per sender (regardless of sender settings)
 	report_senders_after	=> 100,		# minimum number of spams required to make a report on a sender
@@ -236,14 +236,21 @@ sub get_oops
 {
 	my ($config, %extra) = @_;
 	my $oops = new OOPS 
+		oops_args($config), 
+		%extra;
+	return $oops;
+}
+
+sub oops_args
+{
+	return (
 		dbi_dsn		=> $defaults{dbi_dsn},
 		user		=> $defaults{username},
 		password	=> $defaults{password},
 		table_prefix	=> $defaults{table_prefix},
 		auto_initialize	=> 1,
 		auto_upgrade	=> 1,
-		%extra;
-	return $oops;
+	);
 }
 
 my $config_pointer;

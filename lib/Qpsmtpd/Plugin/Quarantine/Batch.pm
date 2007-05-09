@@ -40,15 +40,18 @@ our @EXPORT_OK = qw(
 	find_oldest_bucket prune_headers 
 	prune_recipients generate_recipients 
 	prune_senders generate_senders 
-	fork_agent indent);
+	walk_eval
+	indent);
 
-my $debug = 1;
+my $debug = 0;
 
 my $recipients_deleted = 0;
 my $recipients_settings = 0;
 my $recipients_count = 0;
 my $senders_deleted = 0;
 my $senders_count = 0;
+my $senders_with_settings = 0;
+my $stride = 100;
 
 sub cronjob
 {
@@ -95,8 +98,10 @@ sub cronjob
 	print "# cleaning up senders...\n" if $debug;
 	prune_senders();
 	print "Senders kept: $senders_count\n";
+	print "Senders with settings: $senders_with_settings\n";
 	print "Senders deleted: $senders_deleted\n";
 	print "\n\n";
+
 
 	printf "Time for batch run: %d (seconds)\n", time - $start;
 }
@@ -104,6 +109,11 @@ sub cronjob
 sub upgrade
 {
 	transaction(sub {
+		{
+			print "	Upgrade oops?\n";
+			my $oops = OOPS->new(oops_args(), auto_ugprade => 1);
+			$oops->commit;
+		}
 		my $version;
 		{
 			my $oops = get_oops();
@@ -142,7 +152,6 @@ sub upgrade
 				delete $b0->{$day};
 			}
 			print "Total moved: $b0count\n";
-			update_version($oops);
 			$oops->commit();
 		}
 		if ($version < 0.34) {
@@ -165,57 +174,54 @@ sub upgrade
 
 			require Qpsmtpd::Plugin::Quarantine;
 
-			fork_agent(
-				sub { 
-					my ($pipe) = @_;
-					my $oops = get_oops(readonly => 1, less_caching => 1);
-					my $qd = $oops->{quarantine};
-					for my $bdsum (keys %{$qd->{bodies}}) {
-chomp($bdsum);
-						print $pipe "$bdsum\n";
-					}
+			walk_eval(
+				50,
+				sub {
+					my $oops = shift;
+					return $oops->{quarantine}{bodies};
 				},
 				sub {
-					my ($agent, $batch_size, $line) = @_;
-					push(@buf, $line)
-						if defined $line;
-					if (@buf >= $batch_size or ! defined($line) or $line eq "DO-COMMIT\n") {
-						transaction(sub {
-							$size = 0;
-							$count = 0;
-							my $oops = get_oops();
-							my $qd = $oops->{quarantine};
-							for my $line (@buf) {
-								&$agent($oops, $line);
-							}
-							$qd->{diskused}{$$ % $defaults{size_storage_array_size}} += $size + $count * $defaults{message_size_overhead};
-							$oops->commit();
-							$tsize += $size;
-							$tcount += $count;
-							print "C";
-						});
-						undef @buf;
-					}
-				},
-				sub {
-					my ($oops, $bdsum) = @_;
+					my ($oops, @bodies) = @_;
+					my $size = 0;
+					my $count = 0;
 					my $qd = $oops->{quarantine};
-					chomp($bdsum);
-					my $pbody = $qd->{bodies}{$bdsum};
-					return unless $pbody;
-					return if $pbody->{size};
-					$pbody->{size} = length($pbody->{body});
-					$size += $pbody->{size};
-					$count += 1;
-					print "." if ($tcount + $count) % 10 == 0;
+					for my $bdsum (@bodies) {
+						my $pbody = $qd->{bodies}{$bdsum};
+						return unless $pbody;
+						return if $pbody->{size};
+						$pbody->{size} = length($pbody->{body});
+						$size += $pbody->{size};
+						$count += 1;
+						print "." if ($tcount + $count) % 10 == 0;
+					}
+					$qd->{diskused}{$$ % $defaults{size_storage_array_size}} += $size + $count * $defaults{message_size_overhead};
+					$tsize += $size;
+					$tcount += $count;
+					print "C";
 				},
-				50
-				);
+				allatonce => 1,
+			);
 
 			printf "\n%d messages using %.1fMB\n", $tcount, $tsize / 1024000;
 
-			update_version();
 		}
+		if ($version < 0.37) {
+			print "Running database fsck\n";
+			use OOPS::Fsck;
+			$OOPS::Fsck::check_batchsize = 2000;
+			fsck(oops_args());
+			print "Done with fsck\n";
+		}
+		if ($version < 0.37) {
+			print "Running database GC\n";
+			use OOPS::GC;
+			$OOPS::GC::too_many_todo = 50_000;
+			$OOPS::GC::work_length = 10_000;
+			$OOPS::GC::clear_batchsize = 4000;
+			$OOPS::GC::virtual_hash_slice = 3_000;
+			$OOPS::GC::maximum_spill_size = 10_000;
+		}
+		update_version();
 	});
 }
 
@@ -225,7 +231,6 @@ sub update_version
 	my $doit = sub {
 		my $qd = $oops->{quarantine};
 		require Qpsmtpd::Plugin::Quarantine;
-		delete $qd->{buckets};
 		$qd->{version} = $Qpsmtpd::Plugin::Quarantine::VERSION;
 	};
 	if ($oops) {
@@ -276,22 +281,31 @@ my $mqueue_unsent;
 
 sub sendqueued
 {
-	fork_agent(\&generate_mqueue, \&transaction_wrapper2, \&mqueue_agent1, \&mqueue_agent2, \&mqueue_postcommit, $defaults{mqueue_stride_length});
+	walk_eval($defaults{mqueue_stride_length}, sub {
+		my $oops = shift;
+		return $oops->{quarantine}{mqueue};
+	}, \&mqueue_agent, allatonce => 1);
 }
 
-sub mqueue_agent1
+sub mqueue_agent
 {
-	my ($oops, $mqueue) = @_;
-	my $mq = $oops->{mqueue}{$mqueue} || return;
-	return unless time - $mq->{last_attempt} >= $defaults{mqueue_minimum_gap};
-	$oops->lock($oops->{mqueue}{$mqueue});
+	my ($oops, @mqueue) = @_;
+	for my $mqueue (@mqueue) {
+		my $mq = $oops->{mqueue}{$mqueue};
+		next unless time - $mq->{last_attempt} >= $defaults{mqueue_minimum_gap};
+		$oops->lock($oops->{mqueue}{$mqueue});
+	}
+	for my $mqueue (@mqueue) {
+		my $mq = $oops->{mqueue}{$mqueue};
+		next unless time - $mq->{last_attempt} >= $defaults{mqueue_minimum_gap};
+		mqueue_agent2($oops, $mqueue);
+	}
 }
 
 sub mqueue_agent2
 {
 	my ($oops, $mqueue) = @_;
 	my $mq = $oops->{mqueue}{$mqueue} || return;
-	return unless time - $mq->{last_attempt} >= $defaults{mqueue_minimum_gap};
 
 	if (sendmail(%$mq, debuglogger => sub { 1 }, errorlogger => sub { 1 })) {
 		delete $oops->{mqueue}{$mqueue};
@@ -331,18 +345,6 @@ END
 sub mqueue_postcommit
 {
 	send_postponed();
-}
-
-sub generate_mqueue
-{
-	my ($pipe) = @_;
-
-	my $oops = get_oops(readonly => 1, less_caching => 1);
-	my $qd = $oops->{quarantine};
-
-	for my $mqueue (keys %{$qd->{mqueue}}) {
-		print $pipe "$mqueue\n";
-	}
 }
 
 sub mailq
@@ -442,17 +444,17 @@ END
 
 sub prune_recipients
 {
-	fork_agent(\&generate_recipients, \&transaction_wrapper, \&recipient_agent, $defaults{recipent_stride_length});
+	walk_eval($defaults{recipent_stride_length}, sub { my $oops = shift; return $oops->{quarantine}{recipients} }, \&recipient_agent);
 }
 
 sub recipient_agent
 {
 	my ($oops, $recipient) = @_;
-	chomp($recipient);
 	my $qd = $oops->{quarantine};
 	my $rd = $qd->{recipients}{$recipient};
 	unless ($rd) {
 		print STDERR "That's odd, cannot find recipient '$recipient'\n";
+		delete $qd->{recipients}{$recipient};
 		return;
 	}
 	unless ($rd->{headers}) {
@@ -461,61 +463,61 @@ sub recipient_agent
 		$recipients_deleted++;
 		return;
 	}
+	my $msgcount = %{$rd->{headers}} ? scalar(%{$rd->{headers}}) : 0;
+	print "Recipient: $recipient..." if $debug;
+	printf " (has %d messages)", $msgcount if $debug;
+	printf " %d days idle...", (time - $rd->{last_timestamp})/86400 if $debug;
+	print " has settings" if $debug && $rd->has_settings;
 	if (
 		(
 			(time - $rd->{last_timestamp}) / 86400 > $defaults{keep_idle_recipients} 
 			&& 
-			! %{$rd->{headers}}
+			! $msgcount
 		)
 		||
 		(
 			(time - $rd->{last_timestamp}) / 86400 > $defaults{message_longevity}
 			&&
-			$rd->has_settings()
+			! $rd->has_settings()
 			&&
-			! %{$rd->{headers}}
+			! $msgcount
 		)
 	) {
 		delete $qd->{recipients}{$recipient};
 		$recipients_deleted++;
+		print " DELETE" if $debug;
 	} else {
 		$recipients_settings++ if $rd->has_settings();
 		$recipients_count++;
 	}
-}
-
-sub generate_recipients
-{
-	my ($pipe) = @_;
-
-	my $oops = get_oops(readonly => 1, less_caching => 1);
-
-	my $qd = $oops->{quarantine};
-
-	for my $recipient (keys %{$qd->{recipients}}) {
-		print $pipe "$recipient\n";
-	}
+	print "\n" if $debug;
 }
 
 sub prune_senders
 {
-	fork_agent(\&generate_senders, \&transaction_wrapper, \&sender_agent, $defaults{sender_stride_length});
+	walk_eval($defaults{sender_stride_length}, sub { my $oops = shift; return $oops->{quarantine}{senders} }, \&sender_agent);
 }
 
 sub sender_agent
 {
 	my ($oops, $sender) = @_;
-	chomp($sender);
 	my $qd = $oops->{quarantine};
 	my $psender = $qd->{senders}{$sender};
 	unless ($psender) {
 		print STDERR "That's odd, cannot find sender '$sender'\n";
+		delete $qd->{senders}{$sender};
 		return;
 	}
+
+	print "Sender: $sender" if $debug;
+
+
 	my ($ip, $tstamp);
 	my $kept;
 	while (($ip, $tstamp) = each %{$psender->{send_ip_used}}) {
+		printf " (from %s %d ago)", $ip, (time - $tstamp)/86400 if $debug;
 		if (time - $tstamp > 86400 * $defaults{renotify_sender_ip} * 2) {
+			print "[D]" if $debug;
 			delete $psender->{send_ip_used}{$ip};
 		} else {
 			$kept++;
@@ -524,15 +526,20 @@ sub sender_agent
 
 	my $spams_sent;
 	my $today = time / 86400;
-	for my $spamday ($psender->{spams_sent_perday}) {
+	my $count = 0;
+	for my $spamday (keys %{$psender->{spams_sent_perday}}) {
 		if ($today - $spamday > $defaults{sender_history_to_keep}) {
 			delete $psender->{spams_sent_perday}{$spamday};
 			next;
 		}
 		$spams_sent += $psender->{spams_sent_perday}{$spamday};
+		$count++;
 	}
+	delete $psender->{spams_sent_perday} unless $spams_sent;
+	printf " %d spams in %d days", $spams_sent, $count if $debug;
 
 	if ($spams_sent >= $defaults{report_senders_after}) {
+		print "\n" if $debug;
 		print "Sender $sender has sent $spams_sent in the last $defaults{sender_history_to_keep} days\n";
 		my ($hsum, $pheader);
 		while (($hsum, $pheader) = each %{$psender->{headers}}) {
@@ -543,25 +550,19 @@ sub sender_agent
 		}
 	}
 
-	if (! $kept && ! %$psender->{spams_sent_perday} && ! $psender->has_settings() && ! %{$psender->{headers}}) {
+	my $has_settings = $psender->has_settings();
+
+	printf " kept:%d ss/day:%d settings:%d headers:%s", $kept, scalar(%$psender->{spams_sent_perday}), !!$has_settings, scalar(%{$psender->{headers}}) if $debug;
+
+	if (! $kept && ! scalar(%$psender->{spams_sent_perday}) && ! $has_settings && ! scalar(%{$psender->{headers}})) {
+		print " DELETE" if $debug;
 		delete $qd->{senders}{$sender};
 		$senders_deleted++;
 	} else {
 		$senders_count++;
+		$senders_with_settings++ if $has_settings;
 	}
-}
-
-sub generate_senders
-{
-	my ($pipe) = @_;
-
-	my $oops = get_oops(readonly => 1, less_caching => 1);
-
-	my $qd = $oops->{quarantine};
-
-	for my $sender (keys %{$qd->{senders}}) {
-		print $pipe "$sender\n";
-	}
+	print "\n" if $debug;
 }
 
 sub indent
@@ -574,67 +575,28 @@ sub indent
 	}
 }
 
-sub fork_agent
+sub walk_eval
 {
-	my ($generate, $handler, @args) = @_;
-	my $pipe = new IO::Pipe;
-	my $pid;
-
-	if ($pid = fork()) {
-		# parent
-		$pipe->reader();
-		while (<$pipe>) {
-			&$handler(@args, $_);
-		}
-		&$handler(@args);
-		return $pid;
-	} elsif (defined $pid) {
-		# child
-		$pipe->writer();
-		&$generate($pipe);
-		exit(0);
-	} else {
-		die "Could not fork: $!";
-	}
-}
-
-my @buf;
-
-sub transaction_wrapper
-{
-	my ($agent, $batch_size, $line) = @_;
-	push(@buf, $line)
-		if defined $line;
-	if (@buf >= $batch_size or ! defined($line) or $line eq "DO-COMMIT\n") {
+	my ($stride, $get_hash, $agent, %opts) = @_;
+	my $done = 0;
+	my $last = undef;
+	$stride ||= 100;
+	while (! $done) {
 		transaction(sub {
 			my $oops = get_oops();
-			for my $line (@buf) {
-				&$agent($oops, $line);
+			my $hash = &$get_hash($oops);
+			my @items = walk_hash(%$hash, $stride, $last);
+			if ($opts{allatonce}) {
+				&$agent($oops, @items);
+			} else {
+				for my $item (@items) {
+					&$agent($oops, $item);
+				}
 			}
 			$oops->commit();
+			$last = $items[$#items];
+			$done = 1 unless @items == $stride;
 		});
-		undef @buf;
-	}
-}
-
-sub transaction_wrapper2
-{
-	my ($agent1, $agent2, $postcommit, $batch_size, $line) = @_;
-	push(@buf, $line)
-		if defined $line;
-	if (@buf >= $batch_size or ! defined($line) or $line eq "DO-COMMIT\n") {
-		transaction(sub {
-			my $oops = get_oops();
-			for my $line (@buf) {
-				&$agent1($oops, $line);
-			}
-			for my $line (@buf) {
-				&$agent2($oops, $line);
-			}
-			$oops->commit();
-		});
-		undef @buf;
-		&$postcommit();
 	}
 }
 

@@ -18,7 +18,7 @@
 			>[% GET m.value.subject %]</td><td
 			>[% GET m.value.date %]</td></tr>
 		[% END %]
-		[%- "</table>" IF loop.first %]
+		[%- "</table>" IF loop.last %]
 	[% END %]
 [% END %]
 

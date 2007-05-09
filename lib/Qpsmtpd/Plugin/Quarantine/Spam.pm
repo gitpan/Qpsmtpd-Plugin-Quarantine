@@ -38,9 +38,6 @@ my %spamc_headers = (
 	'X-Spam-Status' => 1,
 	'X-Spam-Report' => 1,
 );
-my %accessio_headers = (
-	'X-Accessio-Status' => 1,
-);
 
 # -----------------------------------------------------------------------
 
@@ -99,10 +96,6 @@ sub check_message_for_spam
 
 		last if $results{filtered};
 
-		if ($defaults{accessio}) {
-			last if accessio($qp, $transaction, \%results, $defaults{accessio});
-		}
-
 		if ($defaults{clamd}) {
 			unless (exists $results{clamav}) {
 				last if
@@ -159,17 +152,6 @@ sub clamav
 	$r->{clamav} = $status;
 	$r->{hlines} .= $status;
 	return $return;
-}
-
-sub accessio
-{
-	my ($qp, $transaction, $r, $command) = @_;
-	my ($found, %found) = results_in_headers($qp, $transaction, $r, $command, \%accessio_headers);
-	$r->{hlines} .= $found;
-	$r->{accessio} = $found;
-	return 0 unless $found =~ /^X-Accessio-Status: YES/;
-	$r->{filtered} .= " ACCESSIO";
-	return 1;
 }
 
 sub results_in_headers
