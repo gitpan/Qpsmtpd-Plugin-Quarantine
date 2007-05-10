@@ -29,7 +29,7 @@ From the command line:
 
 =head1 DESCRIPTION
 
-Qpsmtpd::Plugin::Quarantine implements and outbound mail filter.
+Qpsmtpd::Plugin::Quarantine implements an outbound mail filter.
 A substantial number of internet sites will blacklist senders if they
 send too much spam.  Most will do this without providing enough feedback
 for you (the sender) to figure out where the spam is coming from or why
@@ -56,8 +56,7 @@ so often (configurable).  Both senders and recipients have the option
 (via the website) to have their mail silently discarded so that they
 don't get bothered again.
 
-Qpsmtpd::Plugin::Quarantine uses L<OOPS> to store it's persistent data 
-in mysql or PostgreSQL.  
+Qpsmtpd::Plugin::Quarantine uses L<OOPS> to store it's persistent data.
 
 =head1 INSTALATION
 
@@ -73,7 +72,7 @@ the main SMTP listener.  It will become your smarthost for your other
 mail servers.   You can relegate postfix to just handling local mail by
 adding C<inet_interfaces = 127.0.0.1> to it's C<main.cf>.
 
-Install mysql or PostgreSQL.  Provide the DBI_DSN in either 
+Install mysql, PostgreSQL, or DBD::SQLite2.  Provide the DBI_DSN in either 
 /etc/default/qpsmtpd-quarantine.pl or the Qpsmtpd plugins file (below).
 
 =head2 Qpsmtpd plugin
@@ -183,7 +182,7 @@ Create a CGI somewhere.  It's a very simple program:
 The URL for the CGI needs to be configured as C<baseurl> in your
 choice of config files.
 
-Alternatively, you can set this up using mod_perl.  Apache::Registry
+Alternatively, you can set this up using mod_perl.  L<Apache::Registry>
 provides what is needed to hook it in.  The CGI remains the same.
 
 =head2 /etc/qpsmtpd/quarantine-templates
@@ -193,8 +192,10 @@ Modify as you like.  All should work as-is.
 
 =head2 /etc/qpsmtpd/quarantine.access
 
-This is a L<htpasswd>-style password file that controls access to the admin
-web page.  Create it with C<htpasswd -c /etc/qpsmtpd/quarantine.access adminuser>.
+This is a htpasswd-style password file that controls access to the admin
+web page.  Create it with: 
+
+ htpasswd -c /etc/qpsmtpd/quarantine.access adminuser
 
 =head2 Cron jobs
 
@@ -213,15 +214,16 @@ domains.  The main database will auto-initialize.
 There is a admin web page for looking at senders and recipients.  The
 URL is C<baseurl>/admin.  Cookies must be enabled.
 
-Qpsmtpd::Plugin::Quarantine has an internal mail queue.  The following
-command will dispay what's in it.  Messages in quarantine are not in
-the mail queue.
+Qpsmtpd::Plugin::Quarantine has an internal mail queue for when the system
+MTA is not working.  The following command will display what's in it.
+Messages in quarantine are not in the mail queue.
  
  perl -MQpsmtpd::Plugin::Quarantine::Batch -e mailq
 
 =head1 DEVELOPMENT STATUS
 
-This is green code, just put into production by its author.
+This is used in production by the author and seems stable.  It is
+ready for others to use too.
 
 =head1 THANK THE AUTHOR
 

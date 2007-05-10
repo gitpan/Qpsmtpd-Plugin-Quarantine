@@ -1,3 +1,15 @@
+
+=2007/05/10	1.02
+
+Fixed a few things in the documentation.
+
+=2007/05/09	1.01
+
+Rewrote parts of Batch.pm to use OOPS's new walk_hash().
+
+Fixed bugs in Batch.pm so that senders and recipients
+actually get deleted.
+
 =2007/01/21	0.36
 
 Fixed a problem with the example template for displaying
